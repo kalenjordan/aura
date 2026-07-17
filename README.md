@@ -24,7 +24,7 @@ Open a `.md` file with **File â†’ Open**, or create a new document with **File â
 - One calm, editable canvas with live Markdown styling
 - Styled headings, emphasis, links, quotes, lists, and code
 - Reopens the most recently edited file at launch
-- `Command-K` palette for switching between recent files
+- `Command-E` palette for switching between recent files
 - Opens every file in the same editor window
 - Reloads the open document when Git or another app changes it on disk
 - Adjustable editor text size

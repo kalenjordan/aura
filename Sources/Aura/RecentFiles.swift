@@ -98,7 +98,7 @@ struct RecentFileCommands: Commands {
             Button("Quick Open…") {
                 recentFiles.activateSwitcher()
             }
-            .keyboardShortcut("k", modifiers: .command)
+            .keyboardShortcut("e", modifiers: .command)
         }
     }
 }

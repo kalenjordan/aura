@@ -24,7 +24,7 @@ struct RecentFilesPalette: View {
                                     Image(systemName: "doc.text")
                                         .foregroundStyle(index == recentFiles.selectedIndex ? .white : .secondary)
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(url.deletingPathExtension().lastPathComponent)
+                                        Text(displayName(for: url))
                                             .fontWeight(.medium)
                                         Text(url.deletingLastPathComponent().path)
                                             .font(.caption)
@@ -60,5 +60,18 @@ struct RecentFilesPalette: View {
         .onExitCommand {
             recentFiles.cancelSwitcher()
         }
+    }
+
+    private func displayName(for url: URL) -> String {
+        let path = url.deletingPathExtension().path
+        let repos = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("repos", isDirectory: true)
+            .path + "/"
+
+        if path.hasPrefix(repos) {
+            return String(path.dropFirst(repos.count))
+        }
+
+        return url.deletingPathExtension().lastPathComponent
     }
 }
