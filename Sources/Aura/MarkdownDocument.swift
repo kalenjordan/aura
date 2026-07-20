@@ -11,6 +11,7 @@ final class MarkdownDocument: ObservableObject {
 
     private var autosaveTask: Task<Void, Never>?
     private var fileMonitor: DispatchSourceFileSystemObject?
+    private var directoryMonitor: DispatchSourceFileSystemObject?
     private var isApplyingDiskChange = false
 
     init(text: String = "# Untitled\n\nStart writing…\n") {
@@ -89,6 +90,8 @@ final class MarkdownDocument: ObservableObject {
 
     private func startMonitoring(_ url: URL) {
         stopMonitoring()
+        startFileMonitoring(url)
+
         let directory = url.deletingLastPathComponent()
         let descriptor = Darwin.open(directory.path, O_EVTONLY)
         guard descriptor >= 0 else { return }
@@ -100,6 +103,34 @@ final class MarkdownDocument: ObservableObject {
         )
         source.setEventHandler { [weak self] in
             self?.reloadIfChangedOnDisk()
+            self?.startFileMonitoring(url)
+        }
+        source.setCancelHandler {
+            Darwin.close(descriptor)
+        }
+        directoryMonitor = source
+        source.resume()
+    }
+
+    private func startFileMonitoring(_ url: URL) {
+        fileMonitor?.cancel()
+        fileMonitor = nil
+
+        let descriptor = Darwin.open(url.path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor,
+            eventMask: [.write, .rename, .delete, .revoke],
+            queue: .main
+        )
+        source.setEventHandler { [weak self, weak source] in
+            self?.reloadIfChangedOnDisk()
+
+            let replacementEvents: DispatchSource.FileSystemEvent = [.rename, .delete, .revoke]
+            if let events = source?.data, !events.intersection(replacementEvents).isEmpty {
+                self?.startFileMonitoring(url)
+            }
         }
         source.setCancelHandler {
             Darwin.close(descriptor)
@@ -111,6 +142,8 @@ final class MarkdownDocument: ObservableObject {
     private func stopMonitoring() {
         fileMonitor?.cancel()
         fileMonitor = nil
+        directoryMonitor?.cancel()
+        directoryMonitor = nil
     }
 
     private func reloadIfChangedOnDisk() {
