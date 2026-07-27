@@ -59,6 +59,7 @@ struct RichMarkdownEditor: NSViewRepresentable {
         @Binding private var text: String
         weak var textView: NSTextView?
         private var isStyling = false
+        private var pendingTablePreviews: [PendingTablePreview] = []
 
         init(text: Binding<String>) {
             _text = text
@@ -70,10 +71,19 @@ struct RichMarkdownEditor: NSViewRepresentable {
             applyStyles(fontSize: UserDefaults.standard.double(forKey: "editorFontSize").nonzero(or: 16))
         }
 
+        func textViewDidChangeSelection(_ notification: Notification) {
+            applyStyles(fontSize: UserDefaults.standard.double(forKey: "editorFontSize").nonzero(or: 16))
+        }
+
         func applyStyles(fontSize: Double) {
             guard let textView, let storage = textView.textStorage, !isStyling else { return }
             isStyling = true
             defer { isStyling = false }
+
+            textView.subviews
+                .compactMap { $0 as? MarkdownTablePreview }
+                .forEach { $0.removeFromSuperview() }
+            pendingTablePreviews.removeAll()
 
             let fullRange = NSRange(location: 0, length: storage.length)
             let paragraph = NSMutableParagraphStyle()
@@ -116,7 +126,221 @@ struct RichMarkdownEditor: NSViewRepresentable {
                  .foregroundColor: NSColor.secondaryLabelColor,
                  .backgroundColor: NSColor.quaternaryLabelColor]
             }
+            styleTables(in: storage, fontSize: fontSize)
             storage.endEditing()
+            installTablePreviews(in: textView)
+        }
+
+        private func styleTables(in storage: NSTextStorage, fontSize: Double) {
+            let source = storage.string as NSString
+            let lines = lineRanges(in: source)
+            guard lines.count >= 2 else { return }
+
+            var lineIndex = 0
+            while lineIndex + 1 < lines.count {
+                let header = tableCells(in: source.substring(with: lines[lineIndex]))
+                let delimiter = tableCells(in: source.substring(with: lines[lineIndex + 1]))
+
+                guard header.count >= 2,
+                      header.count == delimiter.count,
+                      delimiter.allSatisfy(isTableDelimiter) else {
+                    lineIndex += 1
+                    continue
+                }
+
+                var endIndex = lineIndex + 2
+                while endIndex < lines.count {
+                    let cells = tableCells(in: source.substring(with: lines[endIndex]))
+                    guard !cells.isEmpty else { break }
+                    endIndex += 1
+                }
+
+                styleTable(
+                    in: storage,
+                    source: source,
+                    lineRanges: Array(lines[lineIndex..<endIndex]),
+                    rows: [header] + Array((lineIndex + 2)..<endIndex).map {
+                        tableCells(in: source.substring(with: lines[$0]))
+                    },
+                    fontSize: fontSize
+                )
+                lineIndex = endIndex
+            }
+        }
+
+        private func styleTable(
+            in storage: NSTextStorage,
+            source: NSString,
+            lineRanges: [NSRange],
+            rows: [[String]],
+            fontSize: Double
+        ) {
+            guard let firstLine = lineRanges.first, let lastLine = lineRanges.last else { return }
+            let tableRange = NSUnionRange(firstLine, lastLine)
+            let selection = textView?.selectedRange() ?? NSRange(location: 0, length: 0)
+            if selection.location < NSMaxRange(tableRange),
+               NSMaxRange(selection) >= tableRange.location {
+                styleEditableTable(
+                    in: storage,
+                    source: source,
+                    lineRanges: lineRanges,
+                    fontSize: fontSize
+                )
+                return
+            }
+
+            let width = min(
+                1_000,
+                max(320, (textView?.bounds.width ?? 800) - 48)
+            )
+            let preview = MarkdownTablePreview(
+                rows: rows,
+                width: width,
+                fontSize: max(11, fontSize - 2)
+            )
+            preview.onEdit = { [weak self] in
+                guard let self, let textView = self.textView else { return }
+                textView.window?.makeFirstResponder(textView)
+                textView.setSelectedRange(NSRange(location: tableRange.location, length: 0))
+                self.applyStyles(
+                    fontSize: UserDefaults.standard.double(forKey: "editorFontSize").nonzero(or: 16)
+                )
+            }
+
+            storage.addAttributes([
+                .font: NSFont.systemFont(ofSize: 0.1),
+                .foregroundColor: NSColor.clear
+            ], range: tableRange)
+            for (index, lineRange) in lineRanges.enumerated() {
+                let style = NSMutableParagraphStyle()
+                style.paragraphSpacing = 0
+                if index == 0 {
+                    style.minimumLineHeight = preview.tableHeight
+                    style.maximumLineHeight = preview.tableHeight
+                    style.paragraphSpacingBefore = 8
+                    style.paragraphSpacing = 8
+                } else {
+                    style.minimumLineHeight = 0.1
+                    style.maximumLineHeight = 0.1
+                }
+                storage.addAttribute(.paragraphStyle, value: style, range: lineRange)
+            }
+            pendingTablePreviews.append(PendingTablePreview(
+                characterLocation: tableRange.location,
+                preview: preview
+            ))
+        }
+
+        private func installTablePreviews(in textView: NSTextView) {
+            guard let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+            layoutManager.ensureLayout(for: textContainer)
+
+            for pending in pendingTablePreviews {
+                let glyphIndex = layoutManager.glyphIndexForCharacter(at: pending.characterLocation)
+                let lineRect = layoutManager.lineFragmentRect(
+                    forGlyphAt: glyphIndex,
+                    effectiveRange: nil
+                )
+                let origin = textView.textContainerOrigin
+                pending.preview.frame.origin = NSPoint(
+                    x: max(24, (textView.bounds.width - pending.preview.frame.width) / 2),
+                    y: origin.y + lineRect.minY
+                )
+                textView.addSubview(pending.preview)
+            }
+        }
+
+        private func styleEditableTable(
+            in storage: NSTextStorage,
+            source: NSString,
+            lineRanges: [NSRange],
+            fontSize: Double
+        ) {
+            let tableFont = NSFont.monospacedSystemFont(ofSize: fontSize - 1, weight: .regular)
+            for (rowIndex, lineRange) in lineRanges.enumerated() {
+                let contentRange = contentRange(for: lineRange, in: source)
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.lineSpacing = 5
+                paragraph.paragraphSpacing = 0
+
+                storage.addAttributes([
+                    .font: rowIndex == 0
+                        ? NSFont.monospacedSystemFont(ofSize: fontSize - 1, weight: .semibold)
+                        : tableFont,
+                    .foregroundColor: rowIndex == 1 ? NSColor.tertiaryLabelColor : NSColor.labelColor,
+                    .paragraphStyle: paragraph
+                ], range: contentRange)
+
+                var isEscaped = false
+                for location in contentRange.location..<NSMaxRange(contentRange) {
+                    let character = source.character(at: location)
+                    if character == 0x7C, !isEscaped {
+                        storage.addAttribute(
+                            .foregroundColor,
+                            value: NSColor.separatorColor,
+                            range: NSRange(location: location, length: 1)
+                        )
+                    }
+                    isEscaped = character == 0x5C && !isEscaped
+                    if character != 0x5C { isEscaped = false }
+                }
+            }
+        }
+
+        private func lineRanges(in source: NSString) -> [NSRange] {
+            var ranges: [NSRange] = []
+            var location = 0
+
+            while location < source.length {
+                let range = source.lineRange(for: NSRange(location: location, length: 0))
+                ranges.append(range)
+                location = NSMaxRange(range)
+            }
+            return ranges
+        }
+
+        private func contentRange(for lineRange: NSRange, in source: NSString) -> NSRange {
+            var length = lineRange.length
+            while length > 0 {
+                let character = source.character(at: lineRange.location + length - 1)
+                guard character == 0x0A || character == 0x0D else { break }
+                length -= 1
+            }
+            return NSRange(location: lineRange.location, length: length)
+        }
+
+        private func tableCells(in line: String) -> [String] {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.contains("|") else { return [] }
+
+            var cells: [String] = []
+            var cell = ""
+            var isEscaped = false
+
+            for character in trimmed {
+                if character == "|", !isEscaped {
+                    cells.append(cell.trimmingCharacters(in: .whitespaces))
+                    cell = ""
+                } else {
+                    cell.append(character)
+                }
+
+                if character == "\\", !isEscaped {
+                    isEscaped = true
+                } else {
+                    isEscaped = false
+                }
+            }
+            cells.append(cell.trimmingCharacters(in: .whitespaces))
+
+            if trimmed.hasPrefix("|") { cells.removeFirst() }
+            if trimmed.hasSuffix("|") { cells.removeLast() }
+            return cells
+        }
+
+        private func isTableDelimiter(_ cell: String) -> Bool {
+            cell.range(of: #"^:?-{3,}:?$"#, options: .regularExpression) != nil
         }
 
         private func styleHeadings(in storage: NSTextStorage, fontSize: Double) {
@@ -153,6 +377,153 @@ struct RichMarkdownEditor: NSViewRepresentable {
                 storage.addAttributes(attributes(match), range: match.range)
             }
         }
+
+        private struct PendingTablePreview {
+            let characterLocation: Int
+            let preview: MarkdownTablePreview
+        }
+    }
+}
+
+private final class MarkdownTablePreview: NSView {
+    var onEdit: (() -> Void)?
+    let tableHeight: CGFloat
+
+    private let rows: [[String]]
+    private let columnWidths: [CGFloat]
+    private let rowHeights: [CGFloat]
+    private let fontSize: CGFloat
+    private let padding: CGFloat = 10
+
+    override var isFlipped: Bool { true }
+
+    init(rows: [[String]], width: CGFloat, fontSize: CGFloat) {
+        let sourceRows = rows
+        let displayFontSize = fontSize
+        self.rows = rows
+        self.fontSize = fontSize
+
+        let columnCount = max(1, rows.map(\.count).max() ?? 1)
+        var weights = Array(repeating: CGFloat(4), count: columnCount)
+        for row in rows {
+            for (index, cell) in row.enumerated() {
+                weights[index] = max(weights[index], sqrt(CGFloat(cell.count)))
+            }
+        }
+        let minimumWidth: CGFloat = min(72, width / CGFloat(columnCount))
+        let flexibleWidth = max(0, width - minimumWidth * CGFloat(columnCount))
+        let weightTotal = weights.reduce(0, +)
+        let calculatedColumnWidths = weights.map {
+            minimumWidth + flexibleWidth * ($0 / weightTotal)
+        }
+        columnWidths = calculatedColumnWidths
+
+        let calculatedRowHeights = sourceRows.enumerated().map { rowIndex, row in
+            let font = rowIndex == 0
+                ? NSFont.systemFont(ofSize: displayFontSize, weight: .semibold)
+                : NSFont.systemFont(ofSize: displayFontSize)
+            var height = displayFontSize + 10
+            for (columnIndex, cell) in row.enumerated()
+                where columnIndex < calculatedColumnWidths.count {
+                let bounds = (cell as NSString).boundingRect(
+                    with: NSSize(
+                        width: max(1, calculatedColumnWidths[columnIndex] - 20),
+                        height: .greatestFiniteMagnitude
+                    ),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: [.font: font]
+                )
+                height = max(height, ceil(bounds.height) + 10)
+            }
+            return height
+        }
+        rowHeights = calculatedRowHeights
+        tableHeight = calculatedRowHeights.reduce(0, +)
+
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: tableHeight))
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        layer?.masksToBounds = true
+        toolTip = "Click to edit Markdown table"
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onEdit?()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        NSColor.textBackgroundColor.setFill()
+        bounds.fill()
+
+        var rowY: CGFloat = 0
+        for (rowIndex, row) in rows.enumerated() {
+            let rowHeight = rowHeights[rowIndex]
+            let rowRect = NSRect(x: 0, y: rowY, width: bounds.width, height: rowHeight)
+
+            if rowIndex == 0 {
+                NSColor.controlAccentColor.withAlphaComponent(0.10).setFill()
+                rowRect.fill()
+            } else if rowIndex.isMultiple(of: 2) {
+                NSColor.quaternaryLabelColor.withAlphaComponent(0.12).setFill()
+                rowRect.fill()
+            }
+
+            var columnX: CGFloat = 0
+            for columnIndex in columnWidths.indices {
+                let width = columnWidths[columnIndex]
+                let cell = columnIndex < row.count ? row[columnIndex] : ""
+                let textRect = NSRect(
+                    x: columnX + padding,
+                    y: rowY + padding / 2,
+                    width: max(1, width - padding * 2),
+                    height: rowHeight - padding
+                )
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: rowIndex == 0
+                        ? NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+                        : NSFont.systemFont(ofSize: fontSize),
+                    .foregroundColor: NSColor.labelColor
+                ]
+                (cell as NSString).draw(
+                    with: textRect,
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: attributes
+                )
+
+                columnX += width
+                if columnIndex < columnWidths.count - 1 {
+                    drawLine(
+                        from: NSPoint(x: columnX, y: rowY),
+                        to: NSPoint(x: columnX, y: rowY + rowHeight)
+                    )
+                }
+            }
+            drawLine(
+                from: NSPoint(x: 0, y: rowY + rowHeight),
+                to: NSPoint(x: bounds.width, y: rowY + rowHeight)
+            )
+            rowY += rowHeight
+        }
+
+        NSColor.separatorColor.setStroke()
+        NSBezierPath(
+            roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+            xRadius: 5,
+            yRadius: 5
+        ).stroke()
+    }
+
+    private func drawLine(from start: NSPoint, to end: NSPoint) {
+        NSColor.separatorColor.setStroke()
+        let path = NSBezierPath()
+        path.move(to: start)
+        path.line(to: end)
+        path.stroke()
     }
 }
 

@@ -22,7 +22,7 @@ Open a `.md` file with **File â†’ Open**, or create a new document with **File â
 
 - Open, edit, and save Markdown or plain-text files
 - One calm, editable canvas with live Markdown styling
-- Styled headings, emphasis, links, quotes, lists, and code
+- Styled headings, emphasis, links, quotes, lists, tables, and code
 - Reopens the most recently edited file at launch
 - `Command-E` palette for switching between recent files
 - Opens every file in the same editor window
