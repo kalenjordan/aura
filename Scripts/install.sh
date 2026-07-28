@@ -17,6 +17,8 @@ cp "Resources/Aura.icns" "$staging/Contents/Resources/Aura.icns"
 
 codesign --force --deep --sign - "$staging"
 
+/usr/bin/pkill -x Aura 2>/dev/null || true
+
 if [[ -d "$destination" ]]; then
     rm -rf "$destination"
 fi

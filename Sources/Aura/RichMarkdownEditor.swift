@@ -60,6 +60,7 @@ struct RichMarkdownEditor: NSViewRepresentable {
         weak var textView: NSTextView?
         private var isStyling = false
         private var pendingTablePreviews: [PendingTablePreview] = []
+        private var pendingCodePreviews: [PendingCodePreview] = []
 
         init(text: Binding<String>) {
             _text = text
@@ -81,9 +82,10 @@ struct RichMarkdownEditor: NSViewRepresentable {
             defer { isStyling = false }
 
             textView.subviews
-                .compactMap { $0 as? MarkdownTablePreview }
+                .filter { $0 is MarkdownTablePreview || $0 is MarkdownCodePreview }
                 .forEach { $0.removeFromSuperview() }
             pendingTablePreviews.removeAll()
+            pendingCodePreviews.removeAll()
 
             let fullRange = NSRange(location: 0, length: storage.length)
             let paragraph = NSMutableParagraphStyle()
@@ -121,14 +123,146 @@ struct RichMarkdownEditor: NSViewRepresentable {
                 [.foregroundColor: NSColor.linkColor,
                  .underlineStyle: NSUnderlineStyle.single.rawValue]
             }
-            stylePattern(#"(?s)```.*?```"#, in: storage) { _ in
-                [.font: NSFont.monospacedSystemFont(ofSize: fontSize - 1, weight: .regular),
-                 .foregroundColor: NSColor.secondaryLabelColor,
-                 .backgroundColor: NSColor.quaternaryLabelColor]
-            }
+            styleCodeBlocks(in: storage, fontSize: fontSize)
             styleTables(in: storage, fontSize: fontSize)
             storage.endEditing()
             installTablePreviews(in: textView)
+            installCodePreviews(in: textView)
+        }
+
+        private func styleCodeBlocks(in storage: NSTextStorage, fontSize: Double) {
+            guard let regex = try? NSRegularExpression(
+                pattern: #"(?ms)^[ \t]{0,3}```[^\n]*\n.*?^[ \t]{0,3}```[ \t]*$"#
+            ) else { return }
+
+            let source = storage.string as NSString
+            let fullRange = NSRange(location: 0, length: storage.length)
+
+            for match in regex.matches(in: storage.string, range: fullRange) {
+                let openingLine = source.lineRange(
+                    for: NSRange(location: match.range.location, length: 0)
+                )
+                let lastCharacter = max(match.range.location, NSMaxRange(match.range) - 1)
+                let closingLine = source.lineRange(
+                    for: NSRange(location: lastCharacter, length: 0)
+                )
+                let selection = textView?.selectedRange() ?? NSRange(location: 0, length: 0)
+                if selection.location < NSMaxRange(match.range),
+                   NSMaxRange(selection) >= match.range.location {
+                    styleEditableCodeBlock(
+                        in: storage,
+                        range: match.range,
+                        fontSize: fontSize
+                    )
+                    continue
+                }
+
+                let openingText = source.substring(with: contentRange(for: openingLine, in: source))
+                let indent = openingText.prefix { $0 == " " || $0 == "\t" }
+                let language = openingText
+                    .dropFirst(indent.count + 3)
+                    .trimmingCharacters(in: .whitespaces)
+                let contentStart = NSMaxRange(openingLine)
+                let contentEnd = closingLine.location
+                let content = contentStart <= contentEnd
+                    ? source.substring(with: NSRange(
+                        location: contentStart,
+                        length: contentEnd - contentStart
+                    ))
+                    : ""
+                let lines = content
+                    .split(separator: "\n", omittingEmptySubsequences: false)
+                    .map { line in
+                        line.hasPrefix(indent) ? String(line.dropFirst(indent.count)) : String(line)
+                    }
+                let preview = MarkdownCodePreview(
+                    lines: lines.last == "" ? Array(lines.dropLast()) : lines,
+                    language: language,
+                    width: max(
+                        240,
+                        textView?.textContainer?.containerSize.width
+                            ?? (textView?.bounds.width ?? 800) - 104
+                    ),
+                    fontSize: max(11, fontSize - 1)
+                )
+                preview.onEdit = { [weak self] in
+                    guard let self, let textView = self.textView else { return }
+                    textView.window?.makeFirstResponder(textView)
+                    textView.setSelectedRange(NSRange(location: contentStart, length: 0))
+                    self.applyStyles(
+                        fontSize: UserDefaults.standard.double(forKey: "editorFontSize").nonzero(or: 16)
+                    )
+                }
+
+                storage.addAttributes([
+                    .font: NSFont.systemFont(ofSize: 0.1),
+                    .foregroundColor: NSColor.clear
+                ], range: match.range)
+                let blockLines = lineRanges(in: source).filter {
+                    NSIntersectionRange($0, match.range).length > 0
+                }
+                for (index, lineRange) in blockLines.enumerated() {
+                    let affectedRange = NSIntersectionRange(lineRange, match.range)
+                    guard affectedRange.length > 0 else { continue }
+                    let paragraph = NSMutableParagraphStyle()
+                    paragraph.paragraphSpacing = 0
+                    if index == 0 {
+                        paragraph.minimumLineHeight = preview.codeHeight
+                        paragraph.maximumLineHeight = preview.codeHeight
+                        paragraph.paragraphSpacingBefore = 8
+                        paragraph.paragraphSpacing = 8
+                    } else {
+                        paragraph.minimumLineHeight = 0.1
+                        paragraph.maximumLineHeight = 0.1
+                    }
+                    storage.addAttribute(.paragraphStyle, value: paragraph, range: affectedRange)
+                }
+                pendingCodePreviews.append(PendingCodePreview(
+                    characterLocation: match.range.location,
+                    preview: preview
+                ))
+            }
+        }
+
+        private func styleEditableCodeBlock(
+            in storage: NSTextStorage,
+            range: NSRange,
+            fontSize: Double
+        ) {
+            let codeFont = NSFont.monospacedSystemFont(
+                ofSize: max(11, fontSize - 1),
+                weight: .regular
+            )
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineSpacing = 3
+            paragraph.paragraphSpacing = 0
+
+            storage.addAttributes([
+                .font: codeFont,
+                .foregroundColor: NSColor.labelColor,
+                .backgroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.08),
+                .paragraphStyle: paragraph
+            ], range: range)
+        }
+
+        private func installCodePreviews(in textView: NSTextView) {
+            guard let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+            layoutManager.ensureLayout(for: textContainer)
+
+            for pending in pendingCodePreviews {
+                let glyphIndex = layoutManager.glyphIndexForCharacter(at: pending.characterLocation)
+                let lineRect = layoutManager.lineFragmentRect(
+                    forGlyphAt: glyphIndex,
+                    effectiveRange: nil
+                )
+                let origin = textView.textContainerOrigin
+                pending.preview.frame.origin = NSPoint(
+                    x: origin.x,
+                    y: origin.y + lineRect.minY
+                )
+                textView.addSubview(pending.preview)
+            }
         }
 
         private func styleTables(in storage: NSTextStorage, fontSize: Double) {
@@ -381,6 +515,80 @@ struct RichMarkdownEditor: NSViewRepresentable {
         private struct PendingTablePreview {
             let characterLocation: Int
             let preview: MarkdownTablePreview
+        }
+
+        private struct PendingCodePreview {
+            let characterLocation: Int
+            let preview: MarkdownCodePreview
+        }
+    }
+}
+
+private final class MarkdownCodePreview: NSView {
+    var onEdit: (() -> Void)?
+    let codeHeight: CGFloat
+
+    private let lines: [String]
+    private let language: String
+    private let font: NSFont
+    private let lineHeight: CGFloat
+
+    override var isFlipped: Bool { true }
+
+    init(lines: [String], language: String, width: CGFloat, fontSize: CGFloat) {
+        self.lines = lines.isEmpty ? [""] : lines
+        self.language = language
+        font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        lineHeight = ceil(font.ascender - font.descender + font.leading) + 4
+        codeHeight = CGFloat(max(1, lines.count)) * lineHeight + 28
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: codeHeight))
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        layer?.masksToBounds = true
+        toolTip = "Click to edit Markdown code block"
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onEdit?()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        NSColor.secondaryLabelColor.withAlphaComponent(0.08).setFill()
+        bounds.fill()
+
+        NSColor.separatorColor.withAlphaComponent(0.35).setStroke()
+        NSBezierPath(
+            roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+            xRadius: 7,
+            yRadius: 7
+        ).stroke()
+
+        let textAttributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.labelColor
+        ]
+        for (index, line) in lines.enumerated() {
+            (line as NSString).draw(
+                at: NSPoint(x: 16, y: 14 + CGFloat(index) * lineHeight),
+                withAttributes: textAttributes
+            )
+        }
+
+        if !language.isEmpty {
+            let labelAttributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+                .foregroundColor: NSColor.tertiaryLabelColor
+            ]
+            let labelSize = (language as NSString).size(withAttributes: labelAttributes)
+            (language.uppercased() as NSString).draw(
+                at: NSPoint(x: bounds.maxX - labelSize.width - 12, y: 8),
+                withAttributes: labelAttributes
+            )
         }
     }
 }
