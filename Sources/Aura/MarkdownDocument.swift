@@ -4,22 +4,31 @@ import SwiftUI
 
 @MainActor
 final class MarkdownDocument: ObservableObject {
+    static let defaultText = "# Untitled\n\nStart writing…\n"
+
     @Published var text: String {
         didSet { scheduleAutosave() }
     }
     @Published private(set) var fileURL: URL?
+
+    var hasSavedUntitledDraft: Bool {
+        FileManager.default.fileExists(atPath: untitledDraftURL.path)
+    }
 
     private var autosaveTask: Task<Void, Never>?
     private var fileMonitor: DispatchSourceFileSystemObject?
     private var directoryMonitor: DispatchSourceFileSystemObject?
     private var isApplyingDiskChange = false
 
-    init(text: String = "# Untitled\n\nStart writing…\n") {
-        self.text = text
+    init(text: String? = nil) {
+        self.text = text ?? Self.loadUntitledDraft() ?? Self.defaultText
     }
 
     func open(_ url: URL) {
         do {
+            if fileURL == nil {
+                saveUntitledDraft()
+            }
             let data = try Data(contentsOf: url)
             guard let decoded = String(data: data, encoding: .utf8)
                     ?? String(data: data, encoding: .utf16) else {
@@ -46,10 +55,11 @@ final class MarkdownDocument: ObservableObject {
     }
 
     func newFile() {
+        guard fileURL != nil else { return }
         autosaveTask?.cancel()
         stopMonitoring()
         fileURL = nil
-        text = "# Untitled\n\nStart writing…\n"
+        text = Self.loadUntitledDraft() ?? Self.defaultText
     }
 
     func save() {
@@ -65,24 +75,67 @@ final class MarkdownDocument: ObservableObject {
         panel.allowedContentTypes = [.markdownDocument]
         panel.nameFieldStringValue = fileURL?.lastPathComponent ?? "Untitled.md"
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        let wasUntitled = fileURL == nil
         fileURL = url
-        write(to: url)
-        startMonitoring(url)
+        if write(to: url) {
+            if wasUntitled {
+                try? FileManager.default.removeItem(at: untitledDraftURL)
+            }
+            startMonitoring(url)
+        }
+    }
+
+    func flushAutosave() {
+        autosaveTask?.cancel()
+        autosaveTask = nil
+        if let fileURL {
+            _ = write(to: fileURL)
+        } else {
+            saveUntitledDraft()
+        }
     }
 
     private func scheduleAutosave() {
-        guard fileURL != nil, !isApplyingDiskChange else { return }
+        guard !isApplyingDiskChange else { return }
         autosaveTask?.cancel()
         autosaveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
-            self?.save()
+            self?.flushAutosave()
         }
     }
 
-    private func write(to url: URL) {
+    @discardableResult
+    private func write(to url: URL) -> Bool {
         do {
-            try text.data(using: .utf8)?.write(to: url, options: .atomic)
+            try Data(text.utf8).write(to: url, options: .atomic)
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    private var untitledDraftURL: URL {
+        Self.untitledDraftURL
+    }
+
+    private static var untitledDraftURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Aura", isDirectory: true)
+            .appendingPathComponent("Untitled.md")
+    }
+
+    private static func loadUntitledDraft() -> String? {
+        try? String(contentsOf: untitledDraftURL, encoding: .utf8)
+    }
+
+    private func saveUntitledDraft() {
+        guard text != Self.defaultText || hasSavedUntitledDraft else { return }
+        do {
+            let directory = untitledDraftURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: untitledDraftURL, options: .atomic)
         } catch {
             present(error)
         }

@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 @main
 struct AuraApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var document = MarkdownDocument()
     @StateObject private var recentFiles = RecentFiles()
 
@@ -11,8 +12,15 @@ struct AuraApp: App {
             EditorView(document: document, recentFiles: recentFiles)
                 .onOpenURL { open($0) }
                 .onAppear {
-                    guard document.fileURL == nil, let latest = recentFiles.urls.first else { return }
+                    guard document.fileURL == nil,
+                          !document.hasSavedUntitledDraft,
+                          let latest = recentFiles.urls.first else { return }
                     open(latest)
+                }
+                .onChange(of: scenePhase) { _, newPhase in
+                    if newPhase != .active {
+                        document.flushAutosave()
+                    }
                 }
         }
         .windowStyle(.hiddenTitleBar)
