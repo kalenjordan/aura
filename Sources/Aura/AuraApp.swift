@@ -12,10 +12,14 @@ struct AuraApp: App {
             EditorView(document: document, recentFiles: recentFiles)
                 .onOpenURL { open($0) }
                 .onAppear {
-                    guard document.fileURL == nil,
-                          !document.hasSavedUntitledDraft,
-                          let latest = recentFiles.urls.first else { return }
-                    open(latest)
+                    guard document.fileURL == nil else { return }
+                    if document.shouldRestoreUntitledDraft {
+                        return
+                    } else if let restored = document.restoredFileURL {
+                        open(restored)
+                    } else if let latest = recentFiles.urls.first {
+                        open(latest)
+                    }
                 }
                 .onChange(of: scenePhase) { _, newPhase in
                     if newPhase != .active {
@@ -36,6 +40,11 @@ struct AuraApp: App {
                     .keyboardShortcut("s", modifiers: .command)
                 Button("Save As…") { document.saveAs() }
                     .keyboardShortcut("s", modifiers: [.command, .shift])
+            }
+            CommandGroup(after: .saveItem) {
+                Button("Close File") { document.closeFile() }
+                    .keyboardShortcut("w", modifiers: .command)
+                    .disabled(document.fileURL == nil)
             }
             TextEditingCommands()
             TextFormattingCommands()

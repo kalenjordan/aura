@@ -4,6 +4,7 @@ import SwiftUI
 struct RichMarkdownEditor: NSViewRepresentable {
     @Binding var text: String
     let fontSize: Double
+    let onCopyAll: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text)
@@ -25,18 +26,32 @@ struct RichMarkdownEditor: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
-        textView.textContainerInset = NSSize(width: 52, height: 38)
+        textView.textContainerInset = NSSize(width: 52, height: 76)
         textView.string = text
-        textView.backgroundColor = .textBackgroundColor
-        textView.drawsBackground = true
+        textView.backgroundColor = .clear
+        textView.drawsBackground = false
         textView.insertionPointColor = .controlAccentColor
 
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
-        scrollView.drawsBackground = false
+        scrollView.backgroundColor = .auraPageShellColor
+        scrollView.drawsBackground = true
 
         context.coordinator.textView = textView
+        textView.onCanvasClick = { [weak coordinator = context.coordinator] in
+            coordinator?.leaveBulletEditMode()
+        }
+        textView.onBulletDoubleClick = { [weak coordinator = context.coordinator] location in
+            coordinator?.enterBulletEditMode(at: location)
+        }
+        textView.onHeadingDoubleClick = { [weak coordinator = context.coordinator] location in
+            coordinator?.enterHeadingEditMode(at: location)
+        }
+        textView.onEditorClick = { [weak coordinator = context.coordinator] location in
+            coordinator?.handleEditorClick(at: location)
+        }
+        textView.onCopyAll = onCopyAll
         context.coordinator.applyStyles(fontSize: fontSize)
         return scrollView
     }
@@ -61,6 +76,9 @@ struct RichMarkdownEditor: NSViewRepresentable {
         private var isStyling = false
         private var pendingTablePreviews: [PendingTablePreview] = []
         private var pendingCodePreviews: [PendingCodePreview] = []
+        private var pendingDecorations: [PendingDecoration] = []
+        private var editingBulletLocation: Int?
+        private var editingHeadingLocation: Int?
 
         init(text: Binding<String>) {
             _text = text
@@ -76,16 +94,74 @@ struct RichMarkdownEditor: NSViewRepresentable {
             applyStyles(fontSize: UserDefaults.standard.double(forKey: "editorFontSize").nonzero(or: 16))
         }
 
+        func enterBulletEditMode(at location: Int) {
+            editingBulletLocation = location
+            editingHeadingLocation = nil
+            applyStyles(fontSize: UserDefaults.standard.double(forKey: "editorFontSize").nonzero(or: 16))
+        }
+
+        func enterHeadingEditMode(at location: Int) {
+            editingBulletLocation = nil
+            editingHeadingLocation = location
+            applyStyles(fontSize: UserDefaults.standard.double(forKey: "editorFontSize").nonzero(or: 16))
+        }
+
+        func handleEditorClick(at location: Int?) {
+            guard let textView = textView as? CenteredTextView else { return }
+            var changed = false
+
+            if editingBulletLocation != nil {
+                let clickedBullet = location.map { character in
+                    textView.activeBulletSourceRanges.contains { NSLocationInRange(character, $0) }
+                } ?? false
+                if !clickedBullet {
+                    editingBulletLocation = nil
+                    changed = true
+                }
+            }
+
+            if let editingHeadingLocation {
+                let activeRange = textView.headingSourceRanges.first {
+                    NSLocationInRange(editingHeadingLocation, $0)
+                }
+                let clickedActiveHeading = location.map { character in
+                    activeRange.map { NSLocationInRange(character, $0) } ?? false
+                } ?? false
+                if !clickedActiveHeading {
+                    self.editingHeadingLocation = nil
+                    changed = true
+                }
+            }
+
+            if changed {
+                applyStyles(fontSize: UserDefaults.standard.double(forKey: "editorFontSize").nonzero(or: 16))
+            }
+        }
+
+        func leaveBulletEditMode() {
+            editingBulletLocation = nil
+            editingHeadingLocation = nil
+            applyStyles(fontSize: UserDefaults.standard.double(forKey: "editorFontSize").nonzero(or: 16))
+        }
+
         func applyStyles(fontSize: Double) {
             guard let textView, let storage = textView.textStorage, !isStyling else { return }
             isStyling = true
             defer { isStyling = false }
 
             textView.subviews
-                .filter { $0 is MarkdownTablePreview || $0 is MarkdownCodePreview }
+                .filter {
+                    $0 is MarkdownTablePreview
+                        || $0 is MarkdownCodePreview
+                        || $0 is MarkdownDecorationView
+                }
                 .forEach { $0.removeFromSuperview() }
             pendingTablePreviews.removeAll()
             pendingCodePreviews.removeAll()
+            pendingDecorations.removeAll()
+            (textView as? CenteredTextView)?.bulletSourceRanges = []
+            (textView as? CenteredTextView)?.activeBulletSourceRanges = []
+            (textView as? CenteredTextView)?.headingSourceRanges = []
 
             let fullRange = NSRange(location: 0, length: storage.length)
             let paragraph = NSMutableParagraphStyle()
@@ -105,7 +181,7 @@ struct RichMarkdownEditor: NSViewRepresentable {
                 [.foregroundColor: NSColor.secondaryLabelColor,
                  .font: NSFontManager.shared.convert(bodyFont, toHaveTrait: .italicFontMask)]
             }
-            stylePattern(#"(?m)^\s*([-*+] |\d+\. )"#, in: storage) { _ in
+            stylePattern(#"(?m)^\s*(\d+\. )"#, in: storage) { _ in
                 [.foregroundColor: NSColor.controlAccentColor,
                  .font: NSFont.boldSystemFont(ofSize: fontSize)]
             }
@@ -117,17 +193,227 @@ struct RichMarkdownEditor: NSViewRepresentable {
             }
             stylePattern(#"`([^`\n]+)`"#, in: storage) { _ in
                 [.font: NSFont.monospacedSystemFont(ofSize: fontSize - 1, weight: .regular),
-                 .foregroundColor: NSColor.systemPink]
+                 .foregroundColor: NSColor.labelColor]
             }
             stylePattern(#"\[([^\]]+)\]\(([^)]+)\)"#, in: storage) { _ in
                 [.foregroundColor: NSColor.linkColor,
                  .underlineStyle: NSUnderlineStyle.single.rawValue]
             }
+            styleBulletLists(in: storage, fontSize: fontSize)
+            styleHorizontalRules(in: storage)
             styleCodeBlocks(in: storage, fontSize: fontSize)
             styleTables(in: storage, fontSize: fontSize)
             storage.endEditing()
             installTablePreviews(in: textView)
             installCodePreviews(in: textView)
+            installDecorations(in: textView)
+            textView.window?.invalidateCursorRects(for: textView)
+        }
+
+        private func styleBulletLists(in storage: NSTextStorage, fontSize: Double) {
+            guard let textView = textView as? CenteredTextView,
+                  let regex = try? NSRegularExpression(
+                    pattern: #"(?m)^([ \t]*)([-+*])([ \t]+)(?=\S)"#
+                  ) else { return }
+
+            let source = storage.string as NSString
+            let fullRange = NSRange(location: 0, length: storage.length)
+            let matches = regex.matches(in: storage.string, range: fullRange)
+            let lineRanges = matches.map {
+                source.lineRange(for: NSRange(location: $0.range.location, length: 0))
+            }
+            var activeSection: NSRange?
+            if let editingBulletLocation,
+               let activeIndex = lineRanges.firstIndex(where: {
+                   NSLocationInRange(editingBulletLocation, $0)
+               }) {
+                var first = activeIndex
+                var last = activeIndex
+                while first > 0,
+                      isWhitespaceOnly(
+                        from: NSMaxRange(lineRanges[first - 1]),
+                        to: lineRanges[first].location,
+                        in: source
+                      ) {
+                    first -= 1
+                }
+                while last + 1 < lineRanges.count,
+                      isWhitespaceOnly(
+                        from: NSMaxRange(lineRanges[last]),
+                        to: lineRanges[last + 1].location,
+                        in: source
+                      ) {
+                    last += 1
+                }
+                activeSection = NSUnionRange(lineRanges[first], lineRanges[last])
+            }
+
+            for (index, match) in matches.enumerated() {
+                let lineRange = source.lineRange(
+                    for: NSRange(location: match.range.location, length: 0)
+                )
+                let content = contentRange(for: lineRange, in: source)
+                let indent = source.substring(with: match.range(at: 1))
+                let level = indent.reduce(0) { count, character in
+                    count + (character == "\t" ? 1 : 0)
+                } + indent.filter { $0 == " " }.count / 2
+                let continuesPrevious = index > 0 && isWhitespaceOnly(
+                    from: NSMaxRange(lineRanges[index - 1]),
+                    to: lineRanges[index].location,
+                    in: source
+                )
+                let continuesNext = index + 1 < lineRanges.count && isWhitespaceOnly(
+                    from: NSMaxRange(lineRanges[index]),
+                    to: lineRanges[index + 1].location,
+                    in: source
+                )
+                let isEditing = activeSection.map {
+                    NSLocationInRange(match.range.location, $0)
+                } ?? false
+
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.lineSpacing = 6
+                paragraph.paragraphSpacingBefore = continuesPrevious ? 0 : 12
+                paragraph.paragraphSpacing = continuesNext ? 10 : 14
+                paragraph.firstLineHeadIndent = isEditing ? 0 : CGFloat(level * 18 + 32)
+                paragraph.headIndent = paragraph.firstLineHeadIndent
+                storage.addAttribute(.paragraphStyle, value: paragraph, range: content)
+
+                textView.bulletSourceRanges.append(content)
+                if isEditing {
+                    textView.activeBulletSourceRanges.append(content)
+                    storage.addAttributes([
+                        .foregroundColor: NSColor.labelColor,
+                        .font: NSFont.systemFont(ofSize: fontSize)
+                    ], range: NSUnionRange(match.range(at: 2), match.range(at: 3)))
+                    continue
+                }
+
+                let markerRange = NSRange(
+                    location: match.range(at: 2).location,
+                    length: NSMaxRange(match.range(at: 3)) - match.range(at: 2).location
+                )
+                storage.addAttributes([
+                    .font: NSFont.systemFont(ofSize: 0.1),
+                    .foregroundColor: NSColor.clear
+                ], range: markerRange)
+
+                pendingDecorations.append(PendingDecoration(
+                    characterLocation: NSMaxRange(match.range),
+                    view: MarkdownDecorationView(kind: .bullet(level: level))
+                ))
+            }
+
+            for pair in zip(matches, matches.dropFirst()) {
+                let previousLine = source.lineRange(
+                    for: NSRange(location: pair.0.range.location, length: 0)
+                )
+                let nextLine = source.lineRange(
+                    for: NSRange(location: pair.1.range.location, length: 0)
+                )
+                let separatorRange = NSRange(
+                    location: NSMaxRange(previousLine),
+                    length: max(0, nextLine.location - NSMaxRange(previousLine))
+                )
+                guard separatorRange.length > 0,
+                      source.substring(with: separatorRange)
+                        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+
+                let compactSeparator = NSMutableParagraphStyle()
+                compactSeparator.minimumLineHeight = 8
+                compactSeparator.maximumLineHeight = 8
+                compactSeparator.paragraphSpacing = 0
+                storage.addAttribute(
+                    .paragraphStyle,
+                    value: compactSeparator,
+                    range: separatorRange
+                )
+            }
+        }
+
+        private func isWhitespaceOnly(from start: Int, to end: Int, in source: NSString) -> Bool {
+            guard start <= end else { return false }
+            return source.substring(with: NSRange(location: start, length: end - start))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+        }
+
+        private func styleHorizontalRules(in storage: NSTextStorage) {
+            guard let textView = textView as? CenteredTextView,
+                  let regex = try? NSRegularExpression(
+                    pattern: #"(?m)^[ \t]{0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"#
+                  ) else { return }
+
+            let fullRange = NSRange(location: 0, length: storage.length)
+            let selection = textView.selectedRange()
+
+            for match in regex.matches(in: storage.string, range: fullRange) {
+                let isEditing = selection.location <= NSMaxRange(match.range)
+                    && NSMaxRange(selection) >= match.range.location
+                if isEditing {
+                    storage.addAttributes([
+                        .foregroundColor: NSColor.tertiaryLabelColor,
+                        .font: NSFont.boldSystemFont(ofSize: 16)
+                    ], range: match.range)
+                    continue
+                }
+
+                storage.addAttributes([
+                    .font: NSFont.systemFont(ofSize: 0.1),
+                    .foregroundColor: NSColor.clear
+                ], range: match.range)
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.minimumLineHeight = 28
+                paragraph.maximumLineHeight = 28
+                paragraph.paragraphSpacingBefore = 8
+                paragraph.paragraphSpacing = 8
+                storage.addAttribute(.paragraphStyle, value: paragraph, range: match.range)
+                pendingDecorations.append(PendingDecoration(
+                    characterLocation: match.range.location,
+                    view: MarkdownDecorationView(kind: .horizontalRule)
+                ))
+            }
+        }
+
+        private func installDecorations(in textView: NSTextView) {
+            guard let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+            layoutManager.ensureLayout(for: textContainer)
+            let origin = textView.textContainerOrigin
+
+            for pending in pendingDecorations {
+                let glyph = layoutManager.glyphIndexForCharacter(at: pending.characterLocation)
+                let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+                let usedLine = layoutManager.lineFragmentUsedRect(
+                    forGlyphAt: glyph,
+                    effectiveRange: nil
+                )
+                switch pending.view.kind {
+                case .bullet:
+                    pending.view.frame = NSRect(
+                        x: origin.x + line.minX + pending.view.bulletIndent,
+                        y: origin.y + usedLine.midY - 6,
+                        width: 12,
+                        height: 12
+                    )
+                case .horizontalRule:
+                    pending.view.frame = NSRect(
+                        x: origin.x,
+                        y: origin.y + line.minY,
+                        width: min(800, textView.bounds.width - origin.x * 2),
+                        height: line.height
+                    )
+                case .headingRule:
+                    let linePadding = textContainer.lineFragmentPadding
+                    pending.view.frame = NSRect(
+                        x: origin.x + linePadding,
+                        y: origin.y + usedLine.maxY + 2,
+                        width: max(1, textContainer.containerSize.width - linePadding * 2),
+                        height: 1
+                    )
+                }
+                textView.addSubview(pending.view)
+            }
         }
 
         private func styleCodeBlocks(in storage: NSTextStorage, fontSize: Double) {
@@ -323,10 +609,10 @@ struct RichMarkdownEditor: NSViewRepresentable {
                 return
             }
 
-            let width = min(
-                1_000,
-                max(320, (textView?.bounds.width ?? 800) - 48)
-            )
+            let containerWidth = textView?.textContainer?.containerSize.width
+                ?? (textView?.bounds.width ?? 800) - 104
+            let linePadding = textView?.textContainer?.lineFragmentPadding ?? 5
+            let width = max(320, containerWidth - linePadding * 2)
             let preview = MarkdownTablePreview(
                 rows: rows,
                 width: width,
@@ -377,8 +663,9 @@ struct RichMarkdownEditor: NSViewRepresentable {
                     effectiveRange: nil
                 )
                 let origin = textView.textContainerOrigin
+                let linePadding = textContainer.lineFragmentPadding
                 pending.preview.frame.origin = NSPoint(
-                    x: max(24, (textView.bounds.width - pending.preview.frame.width) / 2),
+                    x: origin.x + linePadding,
                     y: origin.y + lineRect.minY
                 )
                 textView.addSubview(pending.preview)
@@ -480,23 +767,60 @@ struct RichMarkdownEditor: NSViewRepresentable {
         private func styleHeadings(in storage: NSTextStorage, fontSize: Double) {
             stylePattern(#"(?m)^(#{1,6})[ \t]+.*$"#, in: storage) { match in
                 let source = storage.string as NSString
+                if let editingHeadingLocation,
+                   NSLocationInRange(editingHeadingLocation, match.range) {
+                    let bodyParagraph = NSMutableParagraphStyle()
+                    bodyParagraph.lineSpacing = 6
+                    bodyParagraph.paragraphSpacing = 6
+                    return [
+                        .font: NSFont.systemFont(ofSize: fontSize),
+                        .foregroundColor: NSColor.labelColor,
+                        .paragraphStyle: bodyParagraph
+                    ]
+                }
                 let level = source.substring(with: match.range(at: 1)).count
-                let sizes: [Double] = [32, 27, 23, 20, 18, 17]
+                let sizes: [Double] = [25.6, 21.6, 23, 20, 18, 17]
                 let size = max(fontSize, sizes[level - 1])
                 let style = NSMutableParagraphStyle()
                 style.paragraphSpacingBefore = level <= 2 ? 18 : 12
-                style.paragraphSpacing = 8
-                return [.font: NSFont.systemFont(ofSize: size, weight: level <= 2 ? .bold : .semibold),
-                        .paragraphStyle: style]
+                style.paragraphSpacing = level == 2 ? 22 : 8
+                return [
+                    .font: NSFont.systemFont(
+                        ofSize: size,
+                        weight: level <= 2 ? .bold : .semibold
+                    ),
+                    .foregroundColor: level <= 2
+                        ? NSColor.labelColor.withAlphaComponent(0.68)
+                        : NSColor.labelColor,
+                    .paragraphStyle: style
+                ]
             }
 
-            guard let regex = try? NSRegularExpression(pattern: #"(?m)^(#{1,6})[ \t]+"#) else { return }
+            guard let textView = textView as? CenteredTextView,
+                  let regex = try? NSRegularExpression(pattern: #"(?m)^(#{1,6})[ \t]+"#) else { return }
             let range = NSRange(location: 0, length: storage.length)
             for match in regex.matches(in: storage.string, range: range) {
-                storage.addAttributes([
-                    .font: NSFont.systemFont(ofSize: 0.1),
-                    .foregroundColor: NSColor.clear
-                ], range: match.range)
+                let lineRange = (storage.string as NSString).lineRange(
+                    for: NSRange(location: match.range.location, length: 0)
+                )
+                textView.headingSourceRanges.append(lineRange)
+                let isEditing = editingHeadingLocation.map {
+                    NSLocationInRange($0, lineRange)
+                } ?? false
+                let level = (storage.string as NSString)
+                    .substring(with: match.range(at: 1)).count
+                if !isEditing {
+                    storage.addAttributes([
+                        .font: NSFont.systemFont(ofSize: 0.1),
+                        .foregroundColor: NSColor.clear
+                    ], range: match.range)
+                    if level == 2 {
+                        pendingDecorations.append(PendingDecoration(
+                            characterLocation: match.range.location,
+                            view: MarkdownDecorationView(kind: .headingRule)
+                        ))
+                    }
+                }
             }
         }
 
@@ -520,6 +844,11 @@ struct RichMarkdownEditor: NSViewRepresentable {
         private struct PendingCodePreview {
             let characterLocation: Int
             let preview: MarkdownCodePreview
+        }
+
+        private struct PendingDecoration {
+            let characterLocation: Int
+            let view: MarkdownDecorationView
         }
     }
 }
@@ -660,6 +989,7 @@ private final class MarkdownTablePreview: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard event.clickCount >= 2 else { return }
         onEdit?()
     }
 
@@ -677,7 +1007,7 @@ private final class MarkdownTablePreview: NSView {
                 NSColor.controlAccentColor.withAlphaComponent(0.10).setFill()
                 rowRect.fill()
             } else if rowIndex.isMultiple(of: 2) {
-                NSColor.quaternaryLabelColor.withAlphaComponent(0.12).setFill()
+                NSColor.quaternaryLabelColor.withAlphaComponent(0.06).setFill()
                 rowRect.fill()
             }
 
@@ -736,16 +1066,290 @@ private final class MarkdownTablePreview: NSView {
 }
 
 private final class CenteredTextView: NSTextView {
-    private let baseInset: CGFloat = 52
-    private let maximumCanvasWidth: CGFloat = 800
+    private let pageContentInset: CGFloat = 52
+    private let maximumContentWidth: CGFloat = 700
+    private let pageVerticalMargin: CGFloat = 24
+    var bulletSourceRanges: [NSRange] = []
+    var activeBulletSourceRanges: [NSRange] = []
+    var headingSourceRanges: [NSRange] = []
+    var onCanvasClick: (() -> Void)?
+    var onBulletDoubleClick: ((Int) -> Void)?
+    var onHeadingDoubleClick: ((Int) -> Void)?
+    var onEditorClick: ((Int?) -> Void)?
+    var onCopyAll: (() -> Void)?
+    private var isCanvasFocused = false
+    private var cursorTrackingArea: NSTrackingArea?
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        let extraSpace = max(0, newSize.width - maximumCanvasWidth)
-        textContainerInset = NSSize(width: baseInset + extraSpace / 2, height: 38)
+        textContainerInset = NSSize(
+            width: max(pageContentInset, (newSize.width - maximumContentWidth) / 2),
+            height: pageVerticalMargin + pageContentInset
+        )
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.auraPageShellColor.setFill()
+        dirtyRect.fill()
+
+        let pageRect = currentPageRect
+
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.10)
+        shadow.shadowBlurRadius = 10
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        shadow.set()
+        NSColor.textBackgroundColor.setFill()
+        let pagePath = NSBezierPath(roundedRect: pageRect, xRadius: 2.5, yRadius: 2.5)
+        pagePath.fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        NSGraphicsContext.saveGraphicsState()
+        pagePath.addClip()
+        NSColor(patternImage: Self.paperTexture).setFill()
+        pageRect.fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        NSColor.separatorColor.withAlphaComponent(0.55).setStroke()
+        pagePath.lineWidth = 0.5
+        pagePath.stroke()
+        super.draw(dirtyRect)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard currentPageRect.contains(point) else {
+            isCanvasFocused = true
+            let location = min(selectedRange().location, string.utf16.count)
+            setSelectedRange(NSRange(location: location, length: 0))
+            window?.makeFirstResponder(self)
+            onCanvasClick?()
+            needsDisplay = true
+            return
+        }
+
+        isCanvasFocused = false
+        if event.clickCount == 2,
+           let character = character(at: point),
+           bulletSourceRanges.contains(where: { NSLocationInRange(character, $0) }) {
+            onBulletDoubleClick?(character)
+        } else if event.clickCount == 2,
+                  let character = character(at: point),
+                  headingSourceRanges.contains(where: { NSLocationInRange(character, $0) }) {
+            onHeadingDoubleClick?(character)
+        } else {
+            onEditorClick?(character(at: point))
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func updateTrackingAreas() {
+        if let cursorTrackingArea {
+            removeTrackingArea(cursorTrackingArea)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .cursorUpdate],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        cursorTrackingArea = trackingArea
+        super.updateTrackingAreas()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateCursor(for: event)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        updateCursor(for: event)
+    }
+
+    private func updateCursor(for event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if currentPageRect.contains(point) {
+            NSCursor.iBeam.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+    }
+
+    override func drawInsertionPoint(
+        in rect: NSRect,
+        color: NSColor,
+        turnedOn flag: Bool
+    ) {
+        guard !isCanvasFocused else { return }
+        super.drawInsertionPoint(in: rect, color: color, turnedOn: flag)
+    }
+
+    override func copy(_ sender: Any?) {
+        guard isCanvasFocused else {
+            super.copy(sender)
+            return
+        }
+        onCopyAll?()
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if isCanvasFocused,
+           event.charactersIgnoringModifiers?.lowercased() == "c",
+           modifiers.contains(.command) {
+            onCopyAll?()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if isCanvasFocused, item.action == #selector(copy(_:)) {
+            return true
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if isCanvasFocused,
+           event.charactersIgnoringModifiers?.lowercased() == "c",
+           modifiers.contains(.control) {
+            onCopyAll?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    private var currentPageRect: NSRect {
+        let pageWidth = min(bounds.width, maximumContentWidth + pageContentInset * 2)
+        var contentHeight: CGFloat = 0
+        if let layoutManager, let textContainer {
+            layoutManager.ensureLayout(for: textContainer)
+            contentHeight = layoutManager.usedRect(for: textContainer).height
+        }
+        return NSRect(
+            x: (bounds.width - pageWidth) / 2,
+            y: bounds.minY + pageVerticalMargin,
+            width: pageWidth,
+            height: max(pageContentInset * 2 + contentHeight, pageContentInset * 2 + 20)
+        )
+    }
+
+    private func character(at point: NSPoint) -> Int? {
+        guard let layoutManager, let textContainer else { return nil }
+        let containerPoint = NSPoint(
+            x: point.x - textContainerOrigin.x,
+            y: point.y - textContainerOrigin.y
+        )
+        let glyph = layoutManager.glyphIndex(
+            for: containerPoint,
+            in: textContainer,
+            fractionOfDistanceThroughGlyph: nil
+        )
+        guard glyph < layoutManager.numberOfGlyphs else { return nil }
+        let usedLine = layoutManager.lineFragmentUsedRect(
+            forGlyphAt: glyph,
+            effectiveRange: nil
+        ).insetBy(dx: -4, dy: -2)
+        guard usedLine.contains(containerPoint) else { return nil }
+        return layoutManager.characterIndexForGlyph(at: glyph)
+    }
+
+    private static let paperTexture = NSImage(
+        size: NSSize(width: 36, height: 36),
+        flipped: false
+    ) { _ in
+        NSColor(calibratedWhite: 0.45, alpha: 0.018).setFill()
+        [
+            NSPoint(x: 4, y: 7),
+            NSPoint(x: 17, y: 3),
+            NSPoint(x: 29, y: 12),
+            NSPoint(x: 9, y: 24),
+            NSPoint(x: 24, y: 30),
+            NSPoint(x: 34, y: 22)
+        ].forEach { point in
+            NSRect(x: point.x, y: point.y, width: 0.5, height: 0.5).fill()
+        }
+        return true
+    }
+
+}
+
+private final class MarkdownDecorationView: NSView {
+    enum Kind {
+        case bullet(level: Int)
+        case horizontalRule
+        case headingRule
+    }
+
+    let kind: Kind
+
+    var bulletIndent: CGFloat {
+        guard case .bullet(let level) = kind else { return 0 }
+        return CGFloat(level * 18 + 14)
+    }
+
+    init(kind: Kind) {
+        self.kind = kind
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        switch kind {
+        case .bullet(let level):
+            let diameter: CGFloat = level.isMultiple(of: 2) ? 6 : 5
+            let rect = NSRect(
+                x: (bounds.width - diameter) / 2,
+                y: (bounds.height - diameter) / 2,
+                width: diameter,
+                height: diameter
+            )
+            let path = NSBezierPath(ovalIn: rect)
+            NSColor.secondaryLabelColor.set()
+            if level.isMultiple(of: 2) {
+                path.fill()
+            } else {
+                path.lineWidth = 1.25
+                path.stroke()
+            }
+        case .horizontalRule, .headingRule:
+            let path = NSBezierPath()
+            path.lineWidth = kind.isHeadingRule ? 0.5 : 1
+            path.move(to: NSPoint(x: 0, y: bounds.midY))
+            path.line(to: NSPoint(x: bounds.maxX, y: bounds.midY))
+            NSColor.separatorColor.withAlphaComponent(kind.isHeadingRule ? 0.35 : 1).setStroke()
+            path.stroke()
+        }
+    }
+}
+
+private extension MarkdownDecorationView.Kind {
+    var isHeadingRule: Bool {
+        if case .headingRule = self { return true }
+        return false
     }
 }
 
 private extension Double {
     func nonzero(or fallback: Double) -> Double { self == 0 ? fallback : self }
+}
+
+private extension NSColor {
+    static let auraPageShellColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(calibratedWhite: 0.11, alpha: 1)
+            : NSColor(calibratedWhite: 0.955, alpha: 1)
+    }
 }

@@ -1,9 +1,12 @@
 import SwiftUI
+import AppKit
 
 struct EditorView: View {
     @ObservedObject var document: MarkdownDocument
     @ObservedObject var recentFiles: RecentFiles
     @AppStorage("editorFontSize") private var fontSize = 16.0
+    @State private var didCopyMarkdown = false
+    @State private var isToolbarHovered = false
 
     var body: some View {
         ZStack {
@@ -11,9 +14,25 @@ struct EditorView: View {
                 ZStack {
                     HStack {
                         Spacer()
+
+                        Button {
+                            copyMarkdown()
+                        } label: {
+                            Label(
+                                didCopyMarkdown ? "Copied" : "Copy Markdown",
+                                systemImage: didCopyMarkdown ? "checkmark" : "doc.on.doc"
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(didCopyMarkdown ? .secondary : .primary)
+                        .opacity(isToolbarHovered || didCopyMarkdown ? 1 : 0)
+                        .allowsHitTesting(isToolbarHovered || didCopyMarkdown)
+                        .help("Copy all Markdown")
+
                         Text(wordCountLabel)
                             .font(.callout)
                             .foregroundStyle(.secondary)
+                            .padding(.leading, 14)
                     }
 
                     Text(displayPath)
@@ -25,10 +44,15 @@ struct EditorView: View {
                 }
                 .padding(.horizontal, 18)
                 .frame(height: 38)
+                .onHover { isToolbarHovered = $0 }
 
                 Divider()
 
-                RichMarkdownEditor(text: $document.text, fontSize: fontSize)
+                RichMarkdownEditor(
+                    text: $document.text,
+                    fontSize: fontSize,
+                    onCopyAll: copyMarkdown
+                )
                     .background(Color(nsColor: .textBackgroundColor))
             }
 
@@ -75,5 +99,17 @@ struct EditorView: View {
             return String(path.dropFirst(repos.count))
         }
         return path == home ? "~" : path.replacingOccurrences(of: home + "/", with: "~/")
+    }
+
+    private func copyMarkdown() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(document.text, forType: .string)
+        didCopyMarkdown = true
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
+            didCopyMarkdown = false
+        }
     }
 }

@@ -5,6 +5,8 @@ import SwiftUI
 @MainActor
 final class MarkdownDocument: ObservableObject {
     static let defaultText = "# Untitled\n\nStart writing…\n"
+    private static let restoredFileKey = "activeMarkdownFile"
+    private static let restoreUntitledKey = "activeDocumentWasUntitled"
 
     @Published var text: String {
         didSet { scheduleAutosave() }
@@ -13,6 +15,16 @@ final class MarkdownDocument: ObservableObject {
 
     var hasSavedUntitledDraft: Bool {
         FileManager.default.fileExists(atPath: untitledDraftURL.path)
+    }
+
+    var restoredFileURL: URL? {
+        guard let path = UserDefaults.standard.string(forKey: Self.restoredFileKey),
+              FileManager.default.fileExists(atPath: path) else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
+    var shouldRestoreUntitledDraft: Bool {
+        UserDefaults.standard.bool(forKey: Self.restoreUntitledKey)
     }
 
     private var autosaveTask: Task<Void, Never>?
@@ -39,6 +51,7 @@ final class MarkdownDocument: ObservableObject {
             fileURL = url.standardizedFileURL
             text = decoded
             isApplyingDiskChange = false
+            rememberActiveFile(fileURL)
             startMonitoring(url)
         } catch {
             isApplyingDiskChange = false
@@ -59,7 +72,14 @@ final class MarkdownDocument: ObservableObject {
         autosaveTask?.cancel()
         stopMonitoring()
         fileURL = nil
+        rememberActiveFile(nil)
         text = Self.loadUntitledDraft() ?? Self.defaultText
+    }
+
+    func closeFile() {
+        guard fileURL != nil else { return }
+        flushAutosave()
+        newFile()
     }
 
     func save() {
@@ -78,6 +98,7 @@ final class MarkdownDocument: ObservableObject {
         let wasUntitled = fileURL == nil
         fileURL = url
         if write(to: url) {
+            rememberActiveFile(url)
             if wasUntitled {
                 try? FileManager.default.removeItem(at: untitledDraftURL)
             }
@@ -138,6 +159,16 @@ final class MarkdownDocument: ObservableObject {
             try Data(text.utf8).write(to: untitledDraftURL, options: .atomic)
         } catch {
             present(error)
+        }
+    }
+
+    private func rememberActiveFile(_ url: URL?) {
+        if let url {
+            UserDefaults.standard.set(url.standardizedFileURL.path, forKey: Self.restoredFileKey)
+            UserDefaults.standard.set(false, forKey: Self.restoreUntitledKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.restoredFileKey)
+            UserDefaults.standard.set(true, forKey: Self.restoreUntitledKey)
         }
     }
 

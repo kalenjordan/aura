@@ -5,6 +5,7 @@ repo_root="${0:A:h:h}"
 app_name="Aura.app"
 destination="/Applications/$app_name"
 staging="$repo_root/.build/$app_name"
+signing_identity="${AURA_SIGNING_IDENTITY:-Apple Development: kalenj@gmail.com (85P549P8K8)}"
 
 cd "$repo_root"
 swift build -c release
@@ -15,7 +16,7 @@ cp ".build/release/Aura" "$staging/Contents/MacOS/Aura"
 cp "Resources/Info.plist" "$staging/Contents/Info.plist"
 cp "Resources/Aura.icns" "$staging/Contents/Resources/Aura.icns"
 
-codesign --force --deep --sign - "$staging"
+codesign --force --deep --sign "$signing_identity" "$staging"
 
 /usr/bin/pkill -x Aura 2>/dev/null || true
 
