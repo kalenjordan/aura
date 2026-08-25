@@ -177,6 +177,7 @@ struct RichMarkdownEditor: NSViewRepresentable {
             ], range: fullRange)
 
             styleHeadings(in: storage, fontSize: fontSize)
+            styleBlankSeparatorLines(in: storage)
             stylePattern(#"(?m)^\s*(>)[ \t]+.*$"#, in: storage) { match in
                 [.foregroundColor: NSColor.secondaryLabelColor,
                  .font: NSFontManager.shared.convert(bodyFont, toHaveTrait: .italicFontMask)]
@@ -779,17 +780,17 @@ struct RichMarkdownEditor: NSViewRepresentable {
                     ]
                 }
                 let level = source.substring(with: match.range(at: 1)).count
-                let sizes: [Double] = [25.6, 21.6, 23, 20, 18, 17]
+                let sizes: [Double] = [25.6, 21.6, 19, 18, 17, 16]
                 let size = max(fontSize, sizes[level - 1])
                 let style = NSMutableParagraphStyle()
                 style.paragraphSpacingBefore = level <= 2 ? 18 : 12
-                style.paragraphSpacing = level == 2 ? 22 : 8
+                style.paragraphSpacing = level == 2 ? 22 : level == 3 ? 14 : 8
                 return [
                     .font: NSFont.systemFont(
                         ofSize: size,
                         weight: level <= 2 ? .bold : .semibold
                     ),
-                    .foregroundColor: level <= 2
+                    .foregroundColor: level <= 3
                         ? NSColor.labelColor.withAlphaComponent(0.68)
                         : NSColor.labelColor,
                     .paragraphStyle: style
@@ -821,6 +822,42 @@ struct RichMarkdownEditor: NSViewRepresentable {
                         ))
                     }
                 }
+            }
+        }
+
+        private func styleBlankSeparatorLines(in storage: NSTextStorage) {
+            guard let blankLineRegex = try? NSRegularExpression(
+                pattern: #"(?m)^([ \t]*\r?\n)"#
+            ), let codeBlockRegex = try? NSRegularExpression(
+                pattern: #"(?ms)^[ \t]{0,3}```[^\n]*\n.*?^[ \t]{0,3}```[ \t]*$"#
+            ) else { return }
+
+            let fullRange = NSRange(location: 0, length: storage.length)
+            let selectionLocation = textView?.selectedRange().location
+            let codeBlockRanges = codeBlockRegex.matches(
+                in: storage.string,
+                range: fullRange
+            ).map(\.range)
+            for match in blankLineRegex.matches(in: storage.string, range: fullRange) {
+                let blankLineRange = match.range(at: 1)
+                if let selectionLocation,
+                   NSLocationInRange(selectionLocation, blankLineRange) {
+                    continue
+                }
+                if codeBlockRanges.contains(where: {
+                    NSIntersectionRange($0, blankLineRange).length > 0
+                }) {
+                    continue
+                }
+
+                let collapsedParagraph = NSMutableParagraphStyle()
+                collapsedParagraph.minimumLineHeight = 1
+                collapsedParagraph.maximumLineHeight = 1
+                storage.addAttributes([
+                    .font: NSFont.systemFont(ofSize: 0.1),
+                    .foregroundColor: NSColor.clear,
+                    .paragraphStyle: collapsedParagraph
+                ], range: blankLineRange)
             }
         }
 
