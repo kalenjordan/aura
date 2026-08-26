@@ -166,7 +166,7 @@ struct RichMarkdownEditor: NSViewRepresentable {
             let fullRange = NSRange(location: 0, length: storage.length)
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineSpacing = 6
-            paragraph.paragraphSpacing = 6
+            paragraph.paragraphSpacing = 8
             let bodyFont = NSFont.systemFont(ofSize: fontSize)
 
             storage.beginEditing()
@@ -182,13 +182,7 @@ struct RichMarkdownEditor: NSViewRepresentable {
                 [.foregroundColor: NSColor.secondaryLabelColor,
                  .font: NSFontManager.shared.convert(bodyFont, toHaveTrait: .italicFontMask)]
             }
-            stylePattern(#"(?m)^\s*(\d+\. )"#, in: storage) { _ in
-                [.foregroundColor: NSColor.controlAccentColor,
-                 .font: NSFont.boldSystemFont(ofSize: fontSize)]
-            }
-            stylePattern(#"(\*\*|__)(.+?)\1"#, in: storage) { _ in
-                [.font: NSFont.boldSystemFont(ofSize: fontSize)]
-            }
+            styleStrongEmphasis(in: storage, fontSize: fontSize)
             stylePattern(#"(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)"#, in: storage) { _ in
                 [.font: NSFontManager.shared.convert(bodyFont, toHaveTrait: .italicFontMask)]
             }
@@ -214,7 +208,7 @@ struct RichMarkdownEditor: NSViewRepresentable {
         private func styleBulletLists(in storage: NSTextStorage, fontSize: Double) {
             guard let textView = textView as? CenteredTextView,
                   let regex = try? NSRegularExpression(
-                    pattern: #"(?m)^([ \t]*)([-+*])([ \t]+)(?=\S)"#
+                    pattern: #"(?m)^([ \t]*)([-+*]|\d+\.)([ \t]+)(?=\S)"#
                   ) else { return }
 
             let source = storage.string as NSString
@@ -301,7 +295,14 @@ struct RichMarkdownEditor: NSViewRepresentable {
 
                 pendingDecorations.append(PendingDecoration(
                     characterLocation: NSMaxRange(match.range),
-                    view: MarkdownDecorationView(kind: .bullet(level: level))
+                    view: MarkdownDecorationView(
+                        kind: source.substring(with: match.range(at: 2)).hasSuffix(".")
+                            ? .number(
+                                level: level,
+                                label: source.substring(with: match.range(at: 2))
+                            )
+                            : .bullet(level: level)
+                    )
                 ))
             }
 
@@ -396,6 +397,13 @@ struct RichMarkdownEditor: NSViewRepresentable {
                         y: origin.y + usedLine.midY - 6,
                         width: 12,
                         height: 12
+                    )
+                case .number(let level, _):
+                    pending.view.frame = NSRect(
+                        x: origin.x + line.minX + CGFloat(level * 18 + 2),
+                        y: origin.y + usedLine.midY - 8,
+                        width: 26,
+                        height: 16
                     )
                 case .horizontalRule:
                     pending.view.frame = NSRect(
@@ -838,10 +846,17 @@ struct RichMarkdownEditor: NSViewRepresentable {
                 in: storage.string,
                 range: fullRange
             ).map(\.range)
+            var previousBlankLineEnd: Int?
             for match in blankLineRegex.matches(in: storage.string, range: fullRange) {
                 let blankLineRange = match.range(at: 1)
+                let continuesBlankLineRun = previousBlankLineEnd == blankLineRange.location
+                previousBlankLineEnd = NSMaxRange(blankLineRange)
+                if continuesBlankLineRun {
+                    continue
+                }
                 if let selectionLocation,
-                   NSLocationInRange(selectionLocation, blankLineRange) {
+                   selectionLocation >= blankLineRange.location,
+                   selectionLocation <= NSMaxRange(blankLineRange) {
                     continue
                 }
                 if codeBlockRanges.contains(where: {
@@ -870,6 +885,34 @@ struct RichMarkdownEditor: NSViewRepresentable {
             let range = NSRange(location: 0, length: storage.length)
             for match in regex.matches(in: storage.string, range: range) {
                 storage.addAttributes(attributes(match), range: match.range)
+            }
+        }
+
+        private func styleStrongEmphasis(in storage: NSTextStorage, fontSize: Double) {
+            guard let regex = try? NSRegularExpression(pattern: #"(\*\*|__)(.+?)\1"#) else {
+                return
+            }
+
+            let range = NSRange(location: 0, length: storage.length)
+            for match in regex.matches(in: storage.string, range: range) {
+                let openingMarker = match.range(at: 1)
+                let content = match.range(at: 2)
+                let closingMarker = NSRange(
+                    location: NSMaxRange(content),
+                    length: openingMarker.length
+                )
+
+                storage.addAttribute(
+                    .font,
+                    value: NSFont.boldSystemFont(ofSize: fontSize),
+                    range: content
+                )
+                for marker in [openingMarker, closingMarker] {
+                    storage.addAttributes([
+                        .font: NSFont.systemFont(ofSize: 0.1),
+                        .foregroundColor: NSColor.clear
+                    ], range: marker)
+                }
             }
         }
 
@@ -1318,6 +1361,7 @@ private final class CenteredTextView: NSTextView {
 private final class MarkdownDecorationView: NSView {
     enum Kind {
         case bullet(level: Int)
+        case number(level: Int, label: String)
         case horizontalRule
         case headingRule
     }
@@ -1325,8 +1369,10 @@ private final class MarkdownDecorationView: NSView {
     let kind: Kind
 
     var bulletIndent: CGFloat {
-        guard case .bullet(let level) = kind else { return 0 }
-        return CGFloat(level * 18 + 14)
+        if case .bullet(let level) = kind {
+            return CGFloat(level * 18 + 14)
+        }
+        return 0
     }
 
     init(kind: Kind) {
@@ -1361,6 +1407,17 @@ private final class MarkdownDecorationView: NSView {
                 path.lineWidth = 1.25
                 path.stroke()
             }
+        case .number(_, let label):
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.alignment = .right
+            label.draw(
+                in: bounds,
+                withAttributes: [
+                    .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                    .paragraphStyle: paragraph
+                ]
+            )
         case .horizontalRule, .headingRule:
             let path = NSBezierPath()
             path.lineWidth = kind.isHeadingRule ? 0.5 : 1
