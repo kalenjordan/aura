@@ -35,12 +35,15 @@ struct EditorView: View {
                             .padding(.leading, 14)
                     }
 
-                    Text(displayPath)
-                        .font(.headline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .frame(maxWidth: 520)
-                        .help(document.fileURL?.path ?? "Unsaved file")
+                    HStack(spacing: 8) {
+                        RepositoryFaviconView(fileURL: document.fileURL, size: 18)
+                        Text(displayName)
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: 520)
+                    .help(document.fileURL?.path ?? "Unsaved file")
                 }
                 .padding(.horizontal, 18)
                 .frame(height: 38)
@@ -91,14 +94,8 @@ struct EditorView: View {
         return "\(count) \(count == 1 ? "word" : "words")"
     }
 
-    private var displayPath: String {
-        guard let path = document.fileURL?.path else { return "Untitled.md" }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let repos = home + "/repos/"
-        if path.hasPrefix(repos) {
-            return String(path.dropFirst(repos.count))
-        }
-        return path == home ? "~" : path.replacingOccurrences(of: home + "/", with: "~/")
+    private var displayName: String {
+        document.fileURL?.lastPathComponent ?? "Untitled.md"
     }
 
     private func copyMarkdown() {

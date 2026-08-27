@@ -40,7 +40,7 @@ struct RichMarkdownEditor: NSViewRepresentable {
 
         context.coordinator.textView = textView
         textView.onCanvasClick = { [weak coordinator = context.coordinator] in
-            coordinator?.leaveBulletEditMode()
+            coordinator?.leaveMarkdownEditMode()
         }
         textView.onBulletDoubleClick = { [weak coordinator = context.coordinator] location in
             coordinator?.enterBulletEditMode(at: location)
@@ -50,6 +50,9 @@ struct RichMarkdownEditor: NSViewRepresentable {
         }
         textView.onEditorClick = { [weak coordinator = context.coordinator] location in
             coordinator?.handleEditorClick(at: location)
+        }
+        textView.onExitEditMode = { [weak coordinator = context.coordinator] in
+            coordinator?.leaveMarkdownEditMode()
         }
         textView.onCopyAll = onCopyAll
         context.coordinator.applyStyles(fontSize: fontSize)
@@ -138,9 +141,12 @@ struct RichMarkdownEditor: NSViewRepresentable {
             }
         }
 
-        func leaveBulletEditMode() {
+        func leaveMarkdownEditMode() {
             editingBulletLocation = nil
             editingHeadingLocation = nil
+            if let textView {
+                textView.setSelectedRange(NSRange(location: textView.string.utf16.count, length: 0))
+            }
             applyStyles(fontSize: UserDefaults.standard.double(forKey: "editorFontSize").nonzero(or: 16))
         }
 
@@ -792,7 +798,14 @@ struct RichMarkdownEditor: NSViewRepresentable {
                 let size = max(fontSize, sizes[level - 1])
                 let style = NSMutableParagraphStyle()
                 style.paragraphSpacingBefore = level <= 2 ? 18 : 12
-                style.paragraphSpacing = level == 2 ? 22 : level == 3 ? 14 : 8
+                let followingText = source.substring(from: NSMaxRange(match.range))
+                let isFollowedByH2 = level == 1 && followingText.range(
+                    of: #"^\r?\n(?:[ \t]*\r?\n)?##[ \t]+"#,
+                    options: .regularExpression
+                ) != nil
+                style.paragraphSpacing = level == 1
+                    ? (isFollowedByH2 ? 8 : 22)
+                    : level == 2 ? 22 : level == 3 ? 14 : 8
                 return [
                     .font: NSFont.systemFont(
                         ofSize: size,
@@ -1156,6 +1169,7 @@ private final class CenteredTextView: NSTextView {
     var onBulletDoubleClick: ((Int) -> Void)?
     var onHeadingDoubleClick: ((Int) -> Void)?
     var onEditorClick: ((Int?) -> Void)?
+    var onExitEditMode: (() -> Void)?
     var onCopyAll: (() -> Void)?
     private var isCanvasFocused = false
     private var cursorTrackingArea: NSTrackingArea?
@@ -1211,16 +1225,18 @@ private final class CenteredTextView: NSTextView {
         }
 
         isCanvasFocused = false
+        guard let character = character(at: point) else {
+            focusCanvas()
+            return
+        }
         if event.clickCount == 2,
-           let character = character(at: point),
            bulletSourceRanges.contains(where: { NSLocationInRange(character, $0) }) {
             onBulletDoubleClick?(character)
         } else if event.clickCount == 2,
-                  let character = character(at: point),
                   headingSourceRanges.contains(where: { NSLocationInRange(character, $0) }) {
             onHeadingDoubleClick?(character)
         } else {
-            onEditorClick?(character(at: point))
+            onEditorClick?(character)
         }
         super.mouseDown(with: event)
     }
@@ -1294,6 +1310,10 @@ private final class CenteredTextView: NSTextView {
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 53, modifiers.isEmpty {
+            focusCanvas()
+            return
+        }
         if isCanvasFocused,
            event.charactersIgnoringModifiers?.lowercased() == "c",
            modifiers.contains(.control) {
@@ -1301,6 +1321,13 @@ private final class CenteredTextView: NSTextView {
             return
         }
         super.keyDown(with: event)
+    }
+
+    private func focusCanvas() {
+        isCanvasFocused = true
+        window?.makeFirstResponder(self)
+        onExitEditMode?()
+        needsDisplay = true
     }
 
     private var currentPageRect: NSRect {

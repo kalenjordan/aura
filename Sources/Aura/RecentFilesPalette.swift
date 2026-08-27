@@ -21,8 +21,13 @@ struct RecentFilesPalette: View {
                                 recentFiles.commitSelection()
                             } label: {
                                 HStack(spacing: 12) {
-                                    Image(systemName: "doc.text")
-                                        .foregroundStyle(index == recentFiles.selectedIndex ? .white : .secondary)
+                                    RepositoryFaviconView(
+                                        fileURL: url,
+                                        size: 20,
+                                        fallbackColor: index == recentFiles.selectedIndex
+                                            ? .white
+                                            : .secondary
+                                    )
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(displayName(for: url))
                                             .fontWeight(.medium)
@@ -63,15 +68,6 @@ struct RecentFilesPalette: View {
     }
 
     private func displayName(for url: URL) -> String {
-        let path = url.deletingPathExtension().path
-        let repos = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("repos", isDirectory: true)
-            .path + "/"
-
-        if path.hasPrefix(repos) {
-            return String(path.dropFirst(repos.count))
-        }
-
         return url.deletingPathExtension().lastPathComponent
     }
 }
